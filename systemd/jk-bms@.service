@@ -1,0 +1,16 @@
+[Unit]
+Description=JK BMS telemetry collector for %i
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=/home/%i/jk-bms
+EnvironmentFile=/home/%i/jk-bms/.env
+ExecStart=/home/%i/jk-bms/venv/bin/python /home/%i/jk-bms/jk_push.py
+TimeoutStartSec=25
+
+# Basic service hardening. Bluetooth and network access remain available.
+NoNewPrivileges=true
+PrivateTmp=true

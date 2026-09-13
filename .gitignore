@@ -1,0 +1,36 @@
+# Credentials and device-specific configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime output
+logs/
+*.log
+
+# Coverage and build output
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.tmp
+
+# Superseded local prototypes retained on the deployed Pi
+/jk-push.py
+/jk-read.py
+/grafana-dashboard.json

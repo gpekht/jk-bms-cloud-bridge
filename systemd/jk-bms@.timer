@@ -1,0 +1,11 @@
+[Unit]
+Description=Run JK BMS telemetry collector every 30 seconds for %i
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=jk-bms@%i.service
+
+[Install]
+WantedBy=timers.target

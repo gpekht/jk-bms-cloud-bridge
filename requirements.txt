@@ -1,0 +1,5 @@
+bleak==3.0.2
+protobuf==7.36.1
+python-dotenv==1.2.3
+python-snappy==0.7.3
+requests==2.34.2
