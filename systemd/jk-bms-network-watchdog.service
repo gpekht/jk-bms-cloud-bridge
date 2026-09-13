@@ -1,0 +1,13 @@
+[Unit]
+Description=Recover JK BMS host networking after repeated failures
+After=NetworkManager.service tailscaled.service
+Wants=NetworkManager.service tailscaled.service
+
+[Service]
+Type=oneshot
+Environment=WATCHDOG_INTERFACE=wlan0
+Environment=WATCHDOG_DNS_HOST=api.thingspeak.com
+Environment=WATCHDOG_FAILURE_THRESHOLD=3
+EnvironmentFile=-/etc/default/jk-bms-network-watchdog
+ExecStart=/usr/local/sbin/jk-bms-network-watchdog
+TimeoutStartSec=90

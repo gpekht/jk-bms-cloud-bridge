@@ -1,0 +1,123 @@
+#!/bin/sh
+
+set -eu
+
+watchdog_interface=${WATCHDOG_INTERFACE:-wlan0}
+watchdog_dns_host=${WATCHDOG_DNS_HOST:-api.thingspeak.com}
+watchdog_failure_threshold=${WATCHDOG_FAILURE_THRESHOLD:-3}
+watchdog_state_dir=${WATCHDOG_STATE_DIR:-/run/jk-bms-network-watchdog}
+
+case "$watchdog_failure_threshold" in
+    ''|*[!0-9]*|0)
+        logger -t jk-bms-network-watchdog \
+            "WATCHDOG_FAILURE_THRESHOLD must be a positive integer"
+        exit 1
+        ;;
+esac
+
+gateway_state_file="$watchdog_state_dir/gateway-failures"
+dns_state_file="$watchdog_state_dir/dns-failures"
+
+mkdir -p "$watchdog_state_dir"
+
+read_count() {
+    state_file=$1
+    state_count=0
+
+    if [ -r "$state_file" ]; then
+        state_count=$(sed -n '1p' "$state_file")
+    fi
+
+    case "$state_count" in
+        ''|*[!0-9]*) state_count=0 ;;
+    esac
+
+    printf '%s\n' "$state_count"
+}
+
+write_count() {
+    state_file=$1
+    state_count=$2
+    printf '%s\n' "$state_count" > "$state_file"
+}
+
+restart_tailscale() {
+    logger -t jk-bms-network-watchdog \
+        "Restarting Tailscale after repeated DNS or gateway failures"
+
+    if ! systemctl restart tailscaled.service; then
+        logger -t jk-bms-network-watchdog \
+            "Tailscale restart failed"
+        return 1
+    fi
+}
+
+reconnect_wifi() {
+    connection_name=$(nmcli -g GENERAL.CONNECTION device show \
+        "$watchdog_interface" 2>/dev/null || true)
+
+    logger -t jk-bms-network-watchdog \
+        "Gateway unavailable; reconnecting $watchdog_interface"
+
+    if [ -n "$connection_name" ] && [ "$connection_name" != "--" ]; then
+        nmcli --wait 15 connection down "$connection_name" || true
+        sleep 2
+
+        if ! nmcli --wait 60 connection up "$connection_name" \
+            ifname "$watchdog_interface"; then
+            logger -t jk-bms-network-watchdog \
+                "Wi-Fi reconnection failed for $watchdog_interface"
+            return 1
+        fi
+    elif ! nmcli --wait 60 device connect "$watchdog_interface"; then
+        logger -t jk-bms-network-watchdog \
+            "Wi-Fi device connection failed for $watchdog_interface"
+        return 1
+    fi
+
+    restart_tailscale || true
+}
+
+gateway_address=$(ip -4 route show default dev "$watchdog_interface" \
+    2>/dev/null | awk '/^default via / { print $3; exit }')
+
+if [ -n "$gateway_address" ] && \
+    ping -I "$watchdog_interface" -c 3 -W 2 "$gateway_address" \
+        >/dev/null 2>&1; then
+    write_count "$gateway_state_file" 0
+else
+    gateway_failures=$(read_count "$gateway_state_file")
+    gateway_failures=$((gateway_failures + 1))
+    write_count "$gateway_state_file" "$gateway_failures"
+    write_count "$dns_state_file" 0
+
+    logger -t jk-bms-network-watchdog \
+        "Gateway check failed ($gateway_failures/$watchdog_failure_threshold)"
+
+    if [ "$gateway_failures" -ge "$watchdog_failure_threshold" ]; then
+        if reconnect_wifi; then
+            write_count "$gateway_state_file" 0
+            write_count "$dns_state_file" 0
+        fi
+    fi
+
+    exit 0
+fi
+
+if getent ahostsv4 "$watchdog_dns_host" >/dev/null 2>&1; then
+    write_count "$dns_state_file" 0
+    exit 0
+fi
+
+dns_failures=$(read_count "$dns_state_file")
+dns_failures=$((dns_failures + 1))
+write_count "$dns_state_file" "$dns_failures"
+
+logger -t jk-bms-network-watchdog \
+    "DNS check failed ($dns_failures/$watchdog_failure_threshold)"
+
+if [ "$dns_failures" -ge "$watchdog_failure_threshold" ]; then
+    if restart_tailscale; then
+        write_count "$dns_state_file" 0
+    fi
+fi
