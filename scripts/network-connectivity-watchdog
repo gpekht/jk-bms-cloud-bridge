@@ -1,0 +1,291 @@
+#!/usr/bin/python3
+
+"""Recover a NetworkManager connection after repeated connectivity failures."""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+import random
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+
+LOGGER = logging.getLogger("network-connectivity-watchdog")
+
+
+def env_list(name: str, default: str) -> list[str]:
+    return [
+        item.strip()
+        for item in os.getenv(name, default).replace(",", " ").split()
+        if item.strip()
+    ]
+
+
+INTERFACE = os.getenv("WATCHDOG_INTERFACE", "wlan0")
+DNS_NAMES = env_list("WATCHDOG_DNS_NAMES", "example.com iana.org")
+DNS_SERVERS = env_list("WATCHDOG_DNS_SERVERS", "1.1.1.1 8.8.8.8")
+DNS_RECOVERY_SERVICE = os.getenv(
+    "WATCHDOG_DNS_RECOVERY_SERVICE",
+    "tailscaled.service",
+).strip()
+FAILURE_THRESHOLD = int(os.getenv("WATCHDOG_FAILURE_THRESHOLD", "3"))
+DNS_TIMEOUT_SECONDS = float(os.getenv("WATCHDOG_DNS_TIMEOUT_SECONDS", "2"))
+STATE_DIR = Path(
+    os.getenv(
+        "WATCHDOG_STATE_DIR",
+        "/run/network-connectivity-watchdog",
+    )
+)
+
+
+def run(command: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout,
+    )
+
+
+def default_gateway() -> str | None:
+    result = subprocess.run(
+        ["ip", "-4", "route", "show", "default", "dev", INTERFACE],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[0] == "default" and fields[1] == "via":
+            return fields[2]
+    return None
+
+
+def gateway_available(gateway: str | None) -> bool:
+    if not gateway:
+        return False
+    return run(
+        ["ping", "-I", INTERFACE, "-c", "3", "-W", "2", gateway],
+        timeout=10,
+    ).returncode == 0
+
+
+def encode_dns_name(name: str) -> bytes:
+    labels = name.rstrip(".").split(".")
+    encoded = bytearray()
+    for label in labels:
+        label_bytes = label.encode("idna")
+        if not label_bytes or len(label_bytes) > 63:
+            raise ValueError(f"Invalid DNS label in {name!r}")
+        encoded.append(len(label_bytes))
+        encoded.extend(label_bytes)
+    encoded.append(0)
+    return bytes(encoded)
+
+
+def query_dns_server(server: str, name: str) -> bool:
+    transaction_id = random.SystemRandom().randrange(65536)
+    query = (
+        struct.pack("!HHHHHH", transaction_id, 0x0100, 1, 0, 0, 0)
+        + encode_dns_name(name)
+        + struct.pack("!HH", 1, 1)
+    )
+
+    try:
+        socket.inet_pton(socket.AF_INET, server)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns_socket:
+            dns_socket.settimeout(DNS_TIMEOUT_SECONDS)
+            dns_socket.sendto(query, (server, 53))
+            response, _ = dns_socket.recvfrom(4096)
+    except (OSError, TimeoutError, ValueError):
+        return False
+
+    if len(response) < 12:
+        return False
+
+    response_id, flags = struct.unpack("!HH", response[:4])
+    is_response = bool(flags & 0x8000)
+    response_code = flags & 0x000F
+    return response_id == transaction_id and is_response and response_code == 0
+
+
+def public_dns_available() -> bool:
+    return any(
+        query_dns_server(server, name)
+        for server in DNS_SERVERS
+        for name in DNS_NAMES
+    )
+
+
+def system_dns_available() -> bool:
+    for name in DNS_NAMES:
+        try:
+            socket.getaddrinfo(name, 443, socket.AF_INET, socket.SOCK_STREAM)
+            return True
+        except socket.gaierror:
+            continue
+    return False
+
+
+def read_count(path: Path) -> int:
+    try:
+        value = int(path.read_text().strip())
+        return max(value, 0)
+    except (FileNotFoundError, ValueError, OSError):
+        return 0
+
+
+def write_count(path: Path, value: int) -> None:
+    path.write_text(f"{value}\n")
+
+
+def restart_dns_service() -> bool:
+    if not DNS_RECOVERY_SERVICE:
+        LOGGER.warning("System DNS failed; no recovery service is configured")
+        return False
+
+    LOGGER.warning(
+        "Restarting %s after repeated system-DNS failures",
+        DNS_RECOVERY_SERVICE,
+    )
+    result = run(
+        ["systemctl", "restart", DNS_RECOVERY_SERVICE],
+        timeout=30,
+    )
+    if result.returncode != 0:
+        LOGGER.error("Failed to restart %s", DNS_RECOVERY_SERVICE)
+        return False
+    return True
+
+
+def reconnect_interface() -> bool:
+    result = subprocess.run(
+        ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", INTERFACE],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    connection_name = result.stdout.strip()
+
+    LOGGER.warning("Gateway unavailable; reconnecting interface %s", INTERFACE)
+
+    if connection_name and connection_name != "--":
+        run(
+            ["nmcli", "--wait", "15", "connection", "down", connection_name],
+            timeout=20,
+        )
+        time.sleep(2)
+        reconnect = run(
+            [
+                "nmcli",
+                "--wait",
+                "60",
+                "connection",
+                "up",
+                connection_name,
+                "ifname",
+                INTERFACE,
+            ],
+            timeout=70,
+        )
+    else:
+        reconnect = run(
+            ["nmcli", "--wait", "60", "device", "connect", INTERFACE],
+            timeout=70,
+        )
+
+    if reconnect.returncode != 0:
+        LOGGER.error("Failed to reconnect interface %s", INTERFACE)
+        return False
+
+    if DNS_RECOVERY_SERVICE:
+        run(
+            ["systemctl", "restart", DNS_RECOVERY_SERVICE],
+            timeout=30,
+        )
+    return True
+
+
+def diagnostic_report() -> int:
+    gateway = default_gateway()
+    gateway_ok = gateway_available(gateway)
+    system_dns_ok = system_dns_available()
+    public_dns_ok = public_dns_available()
+
+    print(f"interface={INTERFACE}")
+    print(f"gateway={gateway or 'none'}")
+    print(f"gateway_available={str(gateway_ok).lower()}")
+    print(f"system_dns_available={str(system_dns_ok).lower()}")
+    print(f"public_dns_available={str(public_dns_ok).lower()}")
+    print(f"dns_names={','.join(DNS_NAMES)}")
+    print(f"dns_servers={','.join(DNS_SERVERS)}")
+
+    return 0 if gateway_ok and (system_dns_ok or public_dns_ok) else 1
+
+
+def main() -> int:
+    if FAILURE_THRESHOLD < 1:
+        LOGGER.error("WATCHDOG_FAILURE_THRESHOLD must be a positive integer")
+        return 1
+    if not DNS_NAMES or not DNS_SERVERS:
+        LOGGER.error("At least one DNS name and server must be configured")
+        return 1
+
+    if sys.argv[1:] == ["--diagnose"]:
+        return diagnostic_report()
+    if sys.argv[1:]:
+        LOGGER.error("Unknown arguments: %s", " ".join(sys.argv[1:]))
+        return 2
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    gateway_state = STATE_DIR / "gateway-failures"
+    dns_state = STATE_DIR / "dns-failures"
+
+    gateway = default_gateway()
+    if not gateway_available(gateway):
+        gateway_failures = read_count(gateway_state) + 1
+        write_count(gateway_state, gateway_failures)
+        write_count(dns_state, 0)
+        LOGGER.warning(
+            "Gateway check failed (%d/%d)",
+            gateway_failures,
+            FAILURE_THRESHOLD,
+        )
+
+        if gateway_failures >= FAILURE_THRESHOLD and reconnect_interface():
+            write_count(gateway_state, 0)
+            write_count(dns_state, 0)
+        return 0
+
+    write_count(gateway_state, 0)
+
+    if system_dns_available():
+        write_count(dns_state, 0)
+        return 0
+
+    public_dns_ok = public_dns_available()
+    dns_failures = read_count(dns_state) + 1
+    write_count(dns_state, dns_failures)
+    LOGGER.warning(
+        "System DNS check failed (%d/%d); public DNS resolvers %s",
+        dns_failures,
+        FAILURE_THRESHOLD,
+        "respond" if public_dns_ok else "do not respond",
+    )
+
+    if dns_failures >= FAILURE_THRESHOLD and restart_dns_service():
+        write_count(dns_state, 0)
+    return 0
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    raise SystemExit(main())

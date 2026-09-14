@@ -1,0 +1,16 @@
+[Unit]
+Description=Recover system networking after repeated connectivity failures
+After=NetworkManager.service tailscaled.service
+Wants=NetworkManager.service tailscaled.service
+
+[Service]
+Type=oneshot
+Environment=WATCHDOG_INTERFACE=wlan0
+Environment=WATCHDOG_DNS_NAMES=example.com,iana.org
+Environment=WATCHDOG_DNS_SERVERS=1.1.1.1,8.8.8.8
+Environment=WATCHDOG_DNS_RECOVERY_SERVICE=tailscaled.service
+Environment=WATCHDOG_FAILURE_THRESHOLD=3
+Environment="RES_OPTIONS=attempts:1 timeout:2"
+EnvironmentFile=-/etc/default/network-connectivity-watchdog
+ExecStart=/usr/local/sbin/network-connectivity-watchdog
+TimeoutStartSec=120

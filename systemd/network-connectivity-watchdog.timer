@@ -1,11 +1,11 @@
 [Unit]
-Description=Check JK BMS host networking every minute
+Description=Check system networking every minute
 
 [Timer]
 OnBootSec=2min
 OnUnitInactiveSec=1min
 AccuracySec=5s
-Unit=jk-bms-network-watchdog.service
+Unit=network-connectivity-watchdog.service
 
 [Install]
 WantedBy=timers.target

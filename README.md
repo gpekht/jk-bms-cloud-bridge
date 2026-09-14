@@ -37,9 +37,9 @@ prometheus_pb2.py            Generated Python protobuf module
 grafana/jk-bms-dashboard.json
 systemd/jk-bms@.service
 systemd/jk-bms@.timer
-scripts/jk-bms-network-watchdog
-systemd/jk-bms-network-watchdog.service
-systemd/jk-bms-network-watchdog.timer
+scripts/network-connectivity-watchdog
+systemd/network-connectivity-watchdog.service
+systemd/network-connectivity-watchdog.timer
 ```
 
 ## Raspberry Pi setup
@@ -121,42 +121,55 @@ The timer starts 30 seconds after boot and schedules the next run 30 seconds
 after the previous one finishes. To change the cadence, edit
 `OnUnitInactiveSec` in the timer before installation.
 
-## Optional network recovery watchdog
+## System network recovery watchdog
 
 An always-on Raspberry Pi can remain associated with a Wi-Fi access point while
 its router reboots. Because the Wi-Fi link never drops, DHCP or DNS may not
-recover automatically. The included watchdog checks the default gateway once a
-minute and waits for three consecutive failures before reconnecting Wi-Fi. If
-the gateway is healthy but DNS repeatedly fails, it restarts only Tailscale.
+recover automatically. The included generic system watchdog checks the default
+gateway once a minute and waits for three consecutive failures before
+reconnecting Wi-Fi.
+
+DNS is checked through the system resolver using both `example.com` and
+`iana.org`. If that fails, the watchdog directly queries both Cloudflare DNS
+(`1.1.1.1`) and Google Public DNS (`8.8.8.8`) to distinguish a local resolver
+failure from a wider network outage. Repeated system-DNS failures restart only
+the configured DNS recovery service, which defaults to Tailscale on this Pi.
 
 Install the script as a root-owned executable and enable its timer:
 
 ```bash
 sudo install -o root -g root -m 0755 \
-  scripts/jk-bms-network-watchdog \
-  /usr/local/sbin/jk-bms-network-watchdog
+  scripts/network-connectivity-watchdog \
+  /usr/local/sbin/network-connectivity-watchdog
 sudo install -o root -g root -m 0644 \
-  systemd/jk-bms-network-watchdog.service \
-  systemd/jk-bms-network-watchdog.timer \
+  systemd/network-connectivity-watchdog.service \
+  systemd/network-connectivity-watchdog.timer \
   /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now jk-bms-network-watchdog.timer
+sudo systemctl enable --now network-connectivity-watchdog.timer
 ```
 
-The defaults target `wlan0`, resolve `api.thingspeak.com`, and recover after
-three failed checks. Override them in the root-owned file
-`/etc/default/jk-bms-network-watchdog` if needed:
+The defaults target `wlan0` and recover after three failed checks. Override them
+in the root-owned file `/etc/default/network-connectivity-watchdog` if needed:
 
 ```text
 WATCHDOG_INTERFACE=wlan0
-WATCHDOG_DNS_HOST=api.thingspeak.com
+WATCHDOG_DNS_NAMES=example.com,iana.org
+WATCHDOG_DNS_SERVERS=1.1.1.1,8.8.8.8
+WATCHDOG_DNS_RECOVERY_SERVICE=tailscaled.service
 WATCHDOG_FAILURE_THRESHOLD=3
+```
+
+Run a non-recovering diagnostic check with:
+
+```bash
+sudo /usr/local/sbin/network-connectivity-watchdog --diagnose
 ```
 
 Review recovery events with:
 
 ```bash
-journalctl -t jk-bms-network-watchdog
+journalctl -u network-connectivity-watchdog.service
 ```
 
 ## Grafana dashboard
