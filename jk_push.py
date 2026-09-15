@@ -14,7 +14,9 @@ from thingspeak_uploader import push_thingspeak
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = Path(os.getenv("JK_BMS_ENV_FILE", BASE_DIR / ".env"))
-LOG_DIR = BASE_DIR / "logs"
+LOG_DIR = Path(
+    os.getenv("JK_BMS_LOG_DIR", BASE_DIR / "logs")
+)
 LOG_FILE = LOG_DIR / "jk-bms.log"
 
 
@@ -31,11 +33,11 @@ def configure_logging():
         "%(message)s"
     )
 
-    # Persistent log: errors only
+    # Bounded error log; systemd directs it to RAM via JK_BMS_LOG_DIR.
     file_handler = logging.handlers.RotatingFileHandler(
         str(LOG_FILE),
-        maxBytes=2 * 1024 * 1024,
-        backupCount=5,
+        maxBytes=128 * 1024,
+        backupCount=1,
     )
     file_handler.setLevel(logging.ERROR)
     file_handler.setFormatter(formatter)

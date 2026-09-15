@@ -94,8 +94,11 @@ venv/bin/python jk_push.py
 ```
 
 Success is intentionally quiet. The command exits `0`; failures are written to
-the terminal and to `logs/jk-bms.log`. Exit `1` means the BMS read failed, and
-exit `2` means at least one cloud upload failed.
+the terminal. When the supplied systemd unit runs the collector, its bounded
+error log is stored in RAM at `/run/jk-bms/jk-bms.log`, with one 128 KiB backup,
+and is cleared at reboot. Direct manual execution falls back to
+`logs/jk-bms.log` unless `JK_BMS_LOG_DIR` is set. Exit `1` means the BMS read
+failed, and exit `2` means at least one cloud upload failed.
 
 ## Install the systemd timer
 

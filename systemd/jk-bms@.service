@@ -8,8 +8,13 @@ Type=oneshot
 User=%i
 WorkingDirectory=/home/%i/jk-bms
 EnvironmentFile=/home/%i/jk-bms/.env
+Environment=JK_BMS_LOG_DIR=/run/jk-bms
 ExecStart=/home/%i/jk-bms/venv/bin/python /home/%i/jk-bms/jk_push.py
 TimeoutStartSec=25
+RuntimeDirectory=jk-bms
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0027
 
 # Basic service hardening. Bluetooth and network access remain available.
 NoNewPrivileges=true
